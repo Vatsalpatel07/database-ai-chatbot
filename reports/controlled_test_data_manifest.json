@@ -1,0 +1,257 @@
+{
+  "metadata": {
+    "generated_at": "2026-10-05T06:46:50.356849",
+    "database_name": "mnghealthreportingdb",
+    "database_schema": "dbo",
+    "database_engine": "PostgreSQL 18.6",
+    "seed": 42,
+    "total_synthetic_rows": 735,
+    "selected_tables_count": 10,
+    "untouched_tables_count": 57
+  },
+  "table_increments": {
+    "site_details": 5,
+    "site_events": 120,
+    "site_speakers": 25,
+    "site_event_speakers": 150,
+    "site_topics": 20,
+    "site_event_topics": 140,
+    "site_event_registrants": 200,
+    "user_accounts": 35,
+    "site_team_members": 15,
+    "site_tags": 25
+  },
+  "cohort_metrics": {
+    "site_details": {
+      "row_count": 5,
+      "distinct_status_count": 4,
+      "distinct_countries_count": 4,
+      "status_distribution": {
+        "Active": 2,
+        "Pending": 1,
+        "Completed": 1,
+        "Draft": 1
+      },
+      "childless_sites": [
+        "c0000004-0000-0000-0000-000000000004",
+        "c0000005-0000-0000-0000-000000000005"
+      ]
+    },
+    "site_events": {
+      "row_count": 120,
+      "populated_duration_count": 115,
+      "null_duration_count": 5,
+      "sum_duration": 5070,
+      "avg_duration": 44.09,
+      "min_duration": 0,
+      "max_duration": 180,
+      "median_duration": 45.0,
+      "earliest_event_start": "2024-01-15 11:00:00",
+      "latest_event_start": "2026-08-24 10:00:00",
+      "status_distribution": {
+        "Active": 70,
+        "Completed": 35,
+        "Cancelled": 15
+      },
+      "format_distribution": {
+        "Virtual": 60,
+        "In-Person": 40,
+        "Hybrid": 20
+      },
+      "events_per_site": {
+        "c0000001-0000-0000-0000-000000000001": 70,
+        "c0000002-0000-0000-0000-000000000002": 35,
+        "c0000003-0000-0000-0000-000000000003": 15,
+        "c0000004-0000-0000-0000-000000000004": 0,
+        "c0000005-0000-0000-0000-000000000005": 0
+      }
+    },
+    "site_speakers": {
+      "row_count": 25,
+      "distinct_titles": 5,
+      "active_speakers": 20,
+      "inactive_speakers": 5,
+      "speakers_per_site": {
+        "c0000001-0000-0000-0000-000000000001": 12,
+        "c0000002-0000-0000-0000-000000000002": 8,
+        "c0000003-0000-0000-0000-000000000003": 5
+      }
+    },
+    "site_event_speakers": {
+      "row_count": 150,
+      "distinct_events_with_speakers": 70,
+      "distinct_speakers_assigned": 12,
+      "speaker_distribution_per_event": {
+        "events_with_3_speakers": 20,
+        "events_with_2_speakers": 40,
+        "events_with_1_speaker": 10,
+        "events_with_0_speakers": 50
+      }
+    },
+    "site_topics": {
+      "row_count": 20,
+      "distinct_brands": 4,
+      "active_topics": 16,
+      "inactive_topics": 4
+    },
+    "site_event_topics": {
+      "row_count": 140,
+      "distinct_events_with_topics": 120,
+      "distinct_topics_assigned": 20,
+      "topic_distribution_per_event": {
+        "events_with_2_topics": 20,
+        "events_with_1_topic": 100,
+        "events_with_0_topics": 0
+      }
+    },
+    "site_event_registrants": {
+      "row_count": 200,
+      "distinct_events_with_registrants": 70,
+      "null_degrees_count": 10,
+      "null_zip_count": 28,
+      "null_company_count": 40,
+      "cancelled_date_count": 20,
+      "attendance_distribution": {
+        "Attended": 110,
+        "Registered": 55,
+        "Cancelled": 20,
+        "No-Show": 15
+      },
+      "registrant_distribution_per_event": {
+        "events_with_5_registrants": 10,
+        "events_with_3_registrants": 30,
+        "events_with_2_registrants": 30,
+        "events_with_0_registrants": 50
+      }
+    },
+    "user_accounts": {
+      "row_count": 35,
+      "distinct_account_types": 3,
+      "distinct_territories": 5,
+      "active_accounts": 28,
+      "inactive_accounts": 7,
+      "type_distribution": {
+        "HCP": 20,
+        "Rep": 10,
+        "Admin": 5
+      },
+      "accounts_per_site": {
+        "c0000001-0000-0000-0000-000000000001": 18,
+        "c0000002-0000-0000-0000-000000000002": 10,
+        "c0000003-0000-0000-0000-000000000003": 7
+      }
+    },
+    "site_team_members": {
+      "row_count": 15,
+      "distinct_teams": 4,
+      "team_distribution": {
+        "Operations": 6,
+        "Clinical": 4,
+        "Compliance": 3,
+        "Support": 2
+      }
+    },
+    "site_tags": {
+      "row_count": 25,
+      "distinct_tags": 7,
+      "tag_distribution": {
+        "Cardiology": 5,
+        "Oncology": 5,
+        "Neurology": 4,
+        "Clinical Trials": 4,
+        "Immunology": 3,
+        "Continuing Medical Education": 2,
+        "Pediatrics": 2
+      }
+    }
+  },
+  "database_total_metrics": {
+    "site_details_count": 605,
+    "site_events_count": 720,
+    "site_speakers_count": 575,
+    "site_event_speakers_count": 550,
+    "site_topics_count": 570,
+    "site_event_topics_count": 540,
+    "site_event_registrants_count": 800,
+    "user_accounts_count": 585,
+    "site_team_members_count": 415,
+    "site_tags_count": 425
+  },
+  "cross_table_join_metrics": {
+    "site_events_inner_join": {
+      "Synthetic Clinical Site Alpha": 70,
+      "Synthetic Regional Center Gamma": 15,
+      "Synthetic Research Site Beta": 35
+    },
+    "site_events_left_join": {
+      "Synthetic Clinical Site Alpha": 70,
+      "Synthetic Future Site Epsilon": 0,
+      "Synthetic Regional Center Gamma": 15,
+      "Synthetic Research Site Beta": 35,
+      "Synthetic Standalone Site Delta": 0
+    },
+    "fan_out_speaker_registrant_cartesian": {
+      "total_joined_rows": 460,
+      "distinct_events": 70
+    }
+  },
+  "edge_case_and_null_metrics": {
+    "zero_duration_events_count": 10,
+    "null_duration_events_count": 5,
+    "null_degrees_registrants_count": 10,
+    "null_zip_registrants_count": 28,
+    "null_company_registrants_count": 40,
+    "cancelled_registrants_with_cancel_date": 20,
+    "active_registrants_with_null_cancel_date": 180,
+    "childless_parent_sites_count": 2,
+    "childless_parent_sites": [
+      "Synthetic Standalone Site Delta",
+      "Synthetic Future Site Epsilon"
+    ],
+    "events_with_zero_speakers_count": 50,
+    "events_with_zero_registrants_count": 50,
+    "inactive_speakers_count": 5,
+    "inactive_topics_count": 4,
+    "inactive_user_accounts_count": 7,
+    "single_occurrence_categories": {
+      "site_status": [
+        "Pending",
+        "Completed",
+        "Draft"
+      ],
+      "product_name": [
+        "CardioGuard",
+        "NeuroRelief",
+        "OncoCare",
+        "DermProtect",
+        "ImmunoPlus"
+      ]
+    }
+  },
+  "zero_result_entities": [
+    {
+      "entity": "site_client_name",
+      "value": "Nonexistent Zenith Health Corp"
+    },
+    {
+      "entity": "event_status",
+      "value": "Postponed"
+    },
+    {
+      "entity": "speaker_title",
+      "value": "Orthopedic Surgeon"
+    },
+    {
+      "entity": "registrant_city",
+      "value": "Anchorage"
+    },
+    {
+      "entity": "account_territory_name",
+      "value": "Pacific Northwest Nonexistent"
+    },
+    {
+      "entity": "tag",
+      "value": "Ophthalmology"
+    }
+  ]
+}

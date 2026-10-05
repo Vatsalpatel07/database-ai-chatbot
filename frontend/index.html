@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Database AI - natural-language analysis for SQL Server databases.">
+    <title>Database AI · Data Console</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app-shell">
+
+    <aside class="workspace-sidebar">
+        <div class="brand-block">
+            <div class="brand-glyph" aria-hidden="true">
+                <i></i><i></i><i></i><i></i>
+            </div>
+            <div class="brand-copy">
+                <strong>Database AI</strong>
+                <span>DATA CONSOLE</span>
+            </div>
+        </div>
+
+        <div class="sidebar-rule"></div>
+
+        <section class="source-section">
+            <div class="section-caption">
+                <span>ACTIVE SOURCE</span>
+                <span class="section-code">01</span>
+            </div>
+
+            <div class="source-card">
+                <div class="source-topline">
+                    <span class="source-led"></span>
+                    <span>SQL SERVER</span>
+                    <span class="source-state">LIVE</span>
+                </div>
+                <div class="source-name">Connected database</div>
+                <div class="source-meta">Natural-language query interface</div>
+                <div class="source-terminal" aria-hidden="true">
+                    <span>DB</span>
+                    <span>→</span>
+                    <span>AI</span>
+                </div>
+            </div>
+        </section>
+
+        <button id="newChatButton" class="new-analysis" type="button">
+            <span class="new-analysis-symbol" aria-hidden="true">+</span>
+            <span>New analysis</span>
+            <kbd>N</kbd>
+        </button>
+
+        <section class="sidebar-guide">
+            <div class="section-caption"><span>QUERY METHOD</span><span>03</span></div>
+
+            <div class="guide-row">
+                <span class="guide-index">01</span>
+                <div><strong>Ask</strong><small>Use natural language</small></div>
+            </div>
+            <div class="guide-row">
+                <span class="guide-index">02</span>
+                <div><strong>Analyze</strong><small>AI maps intent to data</small></div>
+            </div>
+            <div class="guide-row">
+                <span class="guide-index">03</span>
+                <div><strong>Verify</strong><small>Results come from the source</small></div>
+            </div>
+        </section>
+
+        <div class="sidebar-footer">
+            <span class="footer-status"><i></i> SYSTEM READY</span>
+            <span>v1</span>
+        </div>
+    </aside>
+
+    <main class="analysis-workspace">
+        <header class="workspace-header">
+            <div class="header-left">
+                <div class="breadcrumb"><span>DATABASE</span><b>/</b><span>QUERY CONSOLE</span></div>
+                <div class="title-line">
+                    <h1>Ask your data.</h1>
+                    <span id="connectionIndicator" class="connection-indicator"><span></span>Ready</span>
+                </div>
+                <p id="headerStatus">Database connected. Ask a question to explore its data.</p>
+            </div>
+
+            <div class="header-instrument" aria-hidden="true">
+                <div class="instrument-label">QUERY / 001</div>
+                <div class="instrument-line"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                <div class="instrument-readout">NATURAL LANGUAGE <b>●</b></div>
+            </div>
+        </header>
+
+        <div class="analysis-status" id="analysisStatus" aria-live="polite">
+            <div class="analysis-status-left">
+                <span class="analysis-pulse" aria-hidden="true"></span>
+                <span class="analysis-status-label" id="analysisStatusLabel">DATABASE READY</span>
+            </div>
+            <div class="analysis-status-context" id="analysisStatusContext">Ask a question to begin an analysis.</div>
+        </div>
+
+        <section id="messages" class="conversation" aria-live="polite" aria-label="Database analysis conversation">
+            <div id="welcome" class="workspace-welcome">
+                <div class="welcome-heading">
+                    <div class="eyebrow"><span></span> INTELLIGENCE LAYER</div>
+                    <h2>Turn a question into<br><em>an analysis.</em></h2>
+                    <p>Query the connected database in plain language. No SQL syntax required.</p>
+                </div>
+
+                <div class="welcome-panel">
+                    <div class="panel-topline">
+                        <span>STARTING POINTS</span>
+                        <span>SELECT A QUERY</span>
+                    </div>
+                    <div class="suggestions">
+                        <button type="button" data-question="Give me an overview of this database.">
+                            <span class="suggestion-number">01</span>
+                            <span class="suggestion-main"><strong>Explore</strong><small>Understand what data is available</small></span>
+                            <span class="suggestion-arrow">↗</span>
+                        </button>
+                        <button type="button" data-question="Summarize the important information in this database.">
+                            <span class="suggestion-number">02</span>
+                            <span class="suggestion-main"><strong>Summarize</strong><small>Get a concise view of the data</small></span>
+                            <span class="suggestion-arrow">↗</span>
+                        </button>
+                        <button type="button" data-question="What patterns or notable findings can you identify in this data?">
+                            <span class="suggestion-number">03</span>
+                            <span class="suggestion-main"><strong>Find patterns</strong><small>Investigate notable findings</small></span>
+                            <span class="suggestion-arrow">↗</span>
+                        </button>
+                        <button type="button" data-question="What are the most useful insights I can get from this database?">
+                            <span class="suggestion-number">04</span>
+                            <span class="suggestion-main"><strong>Discover</strong><small>Surface useful information from the data</small></span>
+                            <span class="suggestion-arrow">↗</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="query-area">
+            <form id="chatForm" class="query-composer">
+                <div class="query-prefix" aria-hidden="true"><span>⌁</span></div>
+                <textarea id="questionInput" rows="1" placeholder="Ask anything about your database..." aria-label="Question about database" autocomplete="off" spellcheck="true"></textarea>
+                <div class="query-actions">
+                    <span class="query-hint">ENTER</span>
+                    <button id="sendButton" type="submit" aria-label="Run analysis" title="Run analysis"><span aria-hidden="true">↑</span></button>
+                </div>
+            </form>
+            <div class="query-disclaimer">
+                <span>CONNECTED SOURCE</span>
+                <i></i>
+                <span>Answers are generated from database data.</span>
+                <i></i>
+                <span>SHIFT + ENTER for a new line</span>
+            </div>
+        </div>
+    </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
