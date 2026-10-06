@@ -111,6 +111,10 @@ def _compatible_types(
             "datetime2",
             "smalldatetime",
         },
+        {
+            "uuid",
+            "uniqueidentifier",
+        },
     )
 
     return any(
@@ -140,36 +144,49 @@ def _column_score(
         right_table,
     )
 
+    norm_left = _normalize_identifier(left.name)
+    norm_right = _normalize_identifier(right.name)
+
     if left.name.lower() == right.name.lower():
         score += 0.45
         evidence.append("same column name")
 
-    elif (
-        _normalize_identifier(left.name)
-        == _normalize_identifier(right.name)
-    ):
+    elif norm_left == norm_right:
         score += 0.35
         evidence.append(
             "same normalized identifier"
         )
 
     else:
-        return 0.0, []
+        left_tokens = set(norm_left.split("_")) - {""}
+        right_tokens = set(norm_right.split("_")) - {""}
+        common_tokens = {t for t in (left_tokens & right_tokens) if len(t) > 2}
+
+        if (left_identifier or right_identifier) and common_tokens:
+            score += 0.25
+            evidence.append(
+                f"shared identifier token(s): {', '.join(sorted(common_tokens))}"
+            )
+        elif left_identifier and right_identifier and (
+            left.data_type.lower() in ("uuid", "uniqueidentifier")
+            and right.data_type.lower() in ("uuid", "uniqueidentifier")
+        ):
+            score += 0.20
+            evidence.append("compatible UUID identifier pair")
+        else:
+            return 0.0, []
 
     # Generic relationship evidence:
     # both columns independently look like identifiers.
-    #
-    # Example:
-    #   entity_a.item_id
-    #   entity_b.item_id
-    #
-    # Neither column needs to be a primary key for this evidence
-    # to be useful. Actual value-overlap validation happens later.
     if left_identifier and right_identifier:
         score += 0.15
         evidence.append(
             "both columns are identifier columns"
         )
+
+    if left.data_type.lower() in ("uuid", "uniqueidentifier") and right.data_type.lower() in ("uuid", "uniqueidentifier"):
+        score += 0.10
+        evidence.append("both columns are UUID type")
 
     if left.name in left_table.primary_key_columns:
         score += 0.20
@@ -201,7 +218,7 @@ def _column_score(
 def discover_relationships(
     database_schema: DatabaseSchema,
     selected_tables: list[tuple[str, str]],
-    minimum_confidence: float = 0.60,
+    minimum_confidence: float = 0.45,
 ) -> list[RelationshipCandidate]:
     lookup = {
         (
@@ -323,7 +340,14 @@ def find_candidate_bridge_tables(
         }
 
         # Must have at least one identifier matching left AND one matching right
-        if (table_id_tokens & left_id_tokens) and (table_id_tokens & right_id_tokens):
+        left_words = {w for t in left_id_tokens for w in t.split("_") if len(w) > 2}
+        right_words = {w for t in right_id_tokens for w in t.split("_") if len(w) > 2}
+        table_words = {w for t in table_id_tokens for w in t.split("_") if len(w) > 2}
+
+        has_left_match = bool((table_id_tokens & left_id_tokens) or (table_words & left_words))
+        has_right_match = bool((table_id_tokens & right_id_tokens) or (table_words & right_words))
+
+        if has_left_match and has_right_match:
             bridge_candidates.append(table)
 
     return bridge_candidates
@@ -333,7 +357,7 @@ def discover_bounded_candidates(
     database_schema: DatabaseSchema,
     selected_tables: list[tuple[str, str]],
     include_bridges: bool = True,
-    minimum_confidence: float = 0.60,
+    minimum_confidence: float = 0.45,
 ) -> list[RelationshipCandidate]:
     """
     Bounded relationship candidate discovery.

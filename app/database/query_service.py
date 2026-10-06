@@ -20,7 +20,7 @@ from app.database.sql_executor import (
 )
 from app.database.table_selector import select_tables
 from app.query.analyzer import QuestionAnalyzer
-from app.query.schema import QueryPlan
+from app.query.schema import QueryPlan, QueryFilter
 from app.query.validator import QueryPlanValidator
 from app.query.result_validator import QueryResultValidator
 
@@ -311,19 +311,27 @@ class DatabaseQueryService:
                 question=question,
                 semantic_schema=execution_schema,
                 conversation_context=conversation_context,
+                relationship_service=self.relationship_service,
             )
 
         except TypeError:
             # Compatibility with older analyzer signatures.
             try:
                 plan = self.analyzer.analyze(
-                    question,
-                    execution_schema,
+                    question=question,
+                    semantic_schema=execution_schema,
+                    conversation_context=conversation_context,
                 )
-            except Exception as exc:
-                raise DatabaseQueryServiceError(
-                    f"Question analysis failed: {exc}"
-                ) from exc
+            except TypeError:
+                try:
+                    plan = self.analyzer.analyze(
+                        question,
+                        execution_schema,
+                    )
+                except Exception as exc:
+                    raise DatabaseQueryServiceError(
+                        f"Question analysis failed: {exc}"
+                    ) from exc
 
         except Exception as exc:
             raise DatabaseQueryServiceError(
@@ -398,6 +406,25 @@ class DatabaseQueryService:
                     tables = self._extract_prior_tables_from_context(conversation_context)
                     if tables:
                         execution_schema = self._build_execution_schema(tables=tables)
+
+                if not getattr(plan, "having_filters", None) and referenced_entry:
+                    prior_plan = referenced_entry.get("plan") or (referenced_entry.get("query_context") or {}).get("plan")
+                    if prior_plan:
+                        raw_prior_having = (
+                            prior_plan.get("having_filters")
+                            if isinstance(prior_plan, dict)
+                            else getattr(prior_plan, "having_filters", None)
+                        )
+                        if raw_prior_having and getattr(plan, "aggregation", None):
+                            plan.having_filters = [
+                                QueryFilter(
+                                    column=h.get("column") if isinstance(h, dict) else getattr(h, "column", "count"),
+                                    operator=h.get("operator") if isinstance(h, dict) else getattr(h, "operator", "greater_than"),
+                                    value=h.get("value") if isinstance(h, dict) else getattr(h, "value", None),
+                                )
+                                for h in raw_prior_having
+                                if h is not None
+                            ]
 
         # ------------------------------------------------------
         # Phase 4 correction: unsupported plans
@@ -1160,12 +1187,20 @@ class DatabaseQueryService:
 
         # If explicit required tables were identified
         if required_table_keys:
-            matched = [
-                t for t in tables
-                if (t.schema_name.lower(), t.table_name.lower()) in required_table_keys
-            ]
-            if matched:
-                return matched
+            matched_dict = {
+                (t.schema_name.lower(), t.table_name.lower()): t
+                for t in tables
+            }
+            res_tables = []
+            for req_key in required_table_keys:
+                if req_key in matched_dict:
+                    res_tables.append(matched_dict[req_key])
+                else:
+                    extra_tbl = self.database_schema.get_table(req_key[0], req_key[1])
+                    if extra_tbl is not None:
+                        res_tables.append(extra_tbl)
+            if res_tables:
+                return res_tables
 
         # 4. If no JOINs and no explicit table qualifications, attempt single-table resolution
         if not getattr(plan, "joins", None):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,29 @@ class RelationshipResult:
             if self.relationship_type == "declared_foreign_key"
             else "inferred"
         )
+
+
+@dataclass(frozen=True)
+class RelationshipStep:
+    left_schema: str
+    left_table: str
+    left_column: str
+    right_schema: str
+    right_table: str
+    right_column: str
+    relationship_type: str = "inferred"
+    confidence: float = 1.0
+    join_type: str = "inner"
+    matching_value_count: int | None = None
+    left_distinct_count: int | None = None
+    right_distinct_count: int | None = None
+
+
+@dataclass(frozen=True)
+class RelationshipPath:
+    steps: list[RelationshipStep]
+    confidence: float
+    total_hops: int
 
 
 class RelationshipGraph:
@@ -257,6 +281,206 @@ class RelationshipGraph:
             return paths
         return []
 
+    def find_best_path(
+        self,
+        start: TableKey,
+        target: TableKey,
+        required_intermediates: set[TableKey] | None = None,
+        intermediate_hints: set[TableKey] | None = None,
+        max_depth: int = 3,
+        accepted_only: bool = True,
+    ) -> RelationshipPath | None:
+        """
+        Find the highest-confidence relationship path connecting start and target.
+        Prefers minimal hops when confidence is comparable, ensures required intermediates
+        are covered, penalizes unnecessary bridge tables, and discounts fan-out container joins.
+        """
+        if start == target:
+            return RelationshipPath(steps=[], confidence=1.0, total_hops=0)
+
+        all_paths = self.find_all_paths(
+            start=start,
+            target=target,
+            max_depth=max_depth,
+            accepted_only=accepted_only,
+        )
+        if not all_paths:
+            return None
+
+        intermediate_hints = intermediate_hints or set()
+        candidate_evaluations: list[RelationshipPath] = []
+
+        for node_path in all_paths:
+            steps: list[RelationshipStep] = []
+            path_conf = 1.0
+            valid_path = True
+            has_fanout = False
+
+            for i in range(len(node_path) - 1):
+                from_node = node_path[i]
+                to_node = node_path[i + 1]
+                edges = self.get_edges(from_node, to_node, accepted_only=accepted_only)
+                if not edges:
+                    valid_path = False
+                    break
+
+                best_edge = max(
+                    edges,
+                    key=lambda e: (e.confidence, 1 if e.origin == "declared" else 0)
+                )
+
+                if (best_edge.left_schema, best_edge.left_table) == from_node:
+                    step = RelationshipStep(
+                        left_schema=best_edge.left_schema,
+                        left_table=best_edge.left_table,
+                        left_column=best_edge.left_column,
+                        right_schema=best_edge.right_schema,
+                        right_table=best_edge.right_table,
+                        right_column=best_edge.right_column,
+                        relationship_type=best_edge.relationship_type,
+                        confidence=best_edge.confidence,
+                        matching_value_count=best_edge.matching_value_count,
+                        left_distinct_count=best_edge.left_distinct_count,
+                        right_distinct_count=best_edge.right_distinct_count,
+                    )
+                else:
+                    step = RelationshipStep(
+                        left_schema=best_edge.right_schema,
+                        left_table=best_edge.right_table,
+                        left_column=best_edge.right_column,
+                        right_schema=best_edge.left_schema,
+                        right_table=best_edge.left_table,
+                        right_column=best_edge.left_column,
+                        relationship_type=best_edge.relationship_type,
+                        confidence=best_edge.confidence,
+                        matching_value_count=best_edge.matching_value_count,
+                        left_distinct_count=best_edge.right_distinct_count,
+                        right_distinct_count=best_edge.left_distinct_count,
+                    )
+                steps.append(step)
+                path_conf *= best_edge.confidence
+
+                if best_edge.matching_value_count and best_edge.left_distinct_count and best_edge.right_distinct_count:
+                    min_dist = min(best_edge.left_distinct_count, best_edge.right_distinct_count)
+                    if min_dist > 0 and (best_edge.matching_value_count / min_dist) > 2.0:
+                        has_fanout = True
+
+            if not valid_path or not steps:
+                continue
+
+            hops = len(steps)
+            # Hop penalty: 0.75 ** (hops - 1)
+            score = path_conf * (0.75 ** (hops - 1))
+
+            intermediate_nodes = set(node_path[1:-1])
+
+            # Check required intermediates (must be visited if specified)
+            if required_intermediates:
+                missing_req = required_intermediates - intermediate_nodes
+                if missing_req:
+                    score -= 0.40 * len(missing_req)
+                else:
+                    score += 0.20
+
+            # Penalize unnecessary intermediate tables
+            allowed_nodes = (required_intermediates or set()) | intermediate_hints
+            unnecessary_nodes = intermediate_nodes - allowed_nodes
+            if unnecessary_nodes:
+                score -= 0.15 * len(unnecessary_nodes)
+
+            # Fan-out penalty
+            if has_fanout:
+                score -= 0.15
+
+            # Generic container ID penalty if crossing entities on broad container keys
+            for s in steps:
+                l_c = s.left_column.lower()
+                r_c = s.right_column.lower()
+                if (
+                    any(term in l_c for term in ("site_id", "tenant_id", "client_id"))
+                    and any(term in r_c for term in ("site_id", "tenant_id", "client_id"))
+                    and (required_intermediates or len(all_paths) > 1)
+                ):
+                    score -= 0.15
+
+            candidate_evaluations.append(
+                RelationshipPath(
+                    steps=steps,
+                    confidence=round(max(0.0, score), 3),
+                    total_hops=hops,
+                )
+            )
+
+        if not candidate_evaluations:
+            return None
+
+        def _compare_relationship_paths(p1: RelationshipPath, p2: RelationshipPath) -> int:
+            diff = p1.confidence - p2.confidence
+            if abs(diff) > 0.08:
+                return -1 if diff > 0 else 1
+            if p1.total_hops != p2.total_hops:
+                return -1 if p1.total_hops < p2.total_hops else 1
+            if diff != 0:
+                return -1 if diff > 0 else 1
+            return 0
+
+        candidate_evaluations.sort(key=functools.cmp_to_key(_compare_relationship_paths))
+        return candidate_evaluations[0]
+
+    def find_connecting_path(
+        self,
+        tables: list[TableKey],
+        required_intermediates: set[TableKey] | None = None,
+        max_depth: int = 3,
+        accepted_only: bool = True,
+    ) -> list[RelationshipStep] | None:
+        """
+        Find a connected sequence of join steps linking all supplied tables.
+        """
+        if not tables or len(tables) < 2:
+            return []
+
+        connected_tables: set[TableKey] = {tables[0]}
+        pending_tables = [t for t in tables[1:] if t not in connected_tables]
+        all_steps: list[RelationshipStep] = []
+        executed_pairs: set[tuple[TableKey, TableKey]] = set()
+
+        while pending_tables:
+            best_candidate_step_seq: list[RelationshipStep] | None = None
+            best_score = -1.0
+            best_target: TableKey | None = None
+
+            for start_tbl in connected_tables:
+                for target_tbl in pending_tables:
+                    r_path = self.find_best_path(
+                        start=start_tbl,
+                        target=target_tbl,
+                        required_intermediates=required_intermediates,
+                        intermediate_hints=set(tables),
+                        max_depth=max_depth,
+                        accepted_only=accepted_only,
+                    )
+                    if r_path and r_path.confidence > best_score:
+                        best_score = r_path.confidence
+                        best_candidate_step_seq = r_path.steps
+                        best_target = target_tbl
+
+            if not best_candidate_step_seq or best_target is None:
+                return None
+
+            for step in best_candidate_step_seq:
+                pair = ((step.left_schema, step.left_table), (step.right_schema, step.right_table))
+                rev_pair = (pair[1], pair[0])
+                if pair not in executed_pairs and rev_pair not in executed_pairs:
+                    all_steps.append(step)
+                    executed_pairs.add(pair)
+                    connected_tables.add(pair[0])
+                    connected_tables.add(pair[1])
+
+            pending_tables = [t for t in tables if t not in connected_tables]
+
+        return all_steps
+
     @property
     def relationships(self) -> list[RelationshipResult]:
         return list(self._all_relationships)
@@ -430,7 +654,18 @@ class RelationshipDiscoveryService:
                     right_table=candidate.right_table,
                     right_column=candidate.right_column,
                     reason=reason,
-                    confidence=candidate.confidence if status in {"validated", "candidate_validated"} else 0.0,
+                    confidence=(
+                        round(
+                            min(
+                                1.0,
+                                0.3 * candidate.confidence
+                                + 0.7 * (match_count / max(1, min(left_distinct or 1, right_distinct or 1)))
+                            ),
+                            3
+                        )
+                        if status in {"validated", "candidate_validated"} and match_count and left_distinct and right_distinct
+                        else (candidate.confidence if status in {"validated", "candidate_validated"} else 0.0)
+                    ),
                     matching_value_count=match_count,
                     left_distinct_count=left_distinct,
                     right_distinct_count=right_distinct,
@@ -452,6 +687,20 @@ class RelationshipDiscoveryService:
     def get_graph(self) -> RelationshipGraph:
         """Expose the authoritative canonical relationship graph."""
         return self.graph
+
+    def get_edges(
+        self,
+        table_a: TableKey,
+        table_b: TableKey,
+        accepted_only: bool = True,
+    ) -> list[Any]:
+        """Return all edges between table_a and table_b."""
+        edges = self.graph.get_edges(table_a, table_b, accepted_only=accepted_only)
+        if not edges:
+            self.discover([table_a, table_b])
+            edges = self.graph.get_edges(table_a, table_b, accepted_only=accepted_only)
+        return edges
+
 
     def find_path(
         self,
@@ -493,6 +742,36 @@ class RelationshipDiscoveryService:
     ) -> list[list[TableKey]]:
         """Return all simple paths if multiple distinct paths exist between start and target."""
         return self.graph.detect_ambiguous_paths(start, target, max_depth=max_depth)
+
+    def find_best_path(
+        self,
+        start: TableKey,
+        target: TableKey,
+        required_intermediates: set[TableKey] | None = None,
+        intermediate_hints: set[TableKey] | None = None,
+        max_depth: int = 3,
+    ) -> RelationshipPath | None:
+        """Find the best relationship path between start and target."""
+        return self.graph.find_best_path(
+            start=start,
+            target=target,
+            required_intermediates=required_intermediates,
+            intermediate_hints=intermediate_hints,
+            max_depth=max_depth,
+        )
+
+    def find_connecting_path(
+        self,
+        tables: list[TableKey],
+        required_intermediates: set[TableKey] | None = None,
+        max_depth: int = 3,
+    ) -> list[RelationshipStep] | None:
+        """Find a connected sequence of join steps linking all supplied tables."""
+        return self.graph.find_connecting_path(
+            tables=tables,
+            required_intermediates=required_intermediates,
+            max_depth=max_depth,
+        )
 
 
 # Canonical alias

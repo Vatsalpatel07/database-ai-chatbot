@@ -157,9 +157,57 @@ def validate_query_plan_joins(
 
     relationships = relationship_service.discover(
         selected_tables=sorted(selected_keys),
+        include_bridges=True,
     )
 
     allowed: set[tuple[str, str, str, str, str, str]] = set()
+
+    for fk in database_schema.foreign_keys:
+        fk_key = _relationship_key(
+            fk.schema_name,
+            fk.table_name,
+            fk.column_name,
+            fk.referenced_schema_name,
+            fk.referenced_table_name,
+            fk.referenced_column_name,
+        )
+        fk_rev = (
+            fk.referenced_schema_name,
+            fk.referenced_table_name,
+            fk.referenced_column_name,
+            fk.schema_name,
+            fk.table_name,
+            fk.column_name,
+        )
+        allowed.add(fk_key)
+        allowed.add(fk_rev)
+
+    graph_obj = getattr(relationship_service, "graph", None) or (
+        relationship_service.get_graph() if hasattr(relationship_service, "get_graph") else None
+    )
+    if graph_obj and hasattr(graph_obj, "_adjacency"):
+        for t_a, nbrs in graph_obj._adjacency.items():
+            for t_b, edge_list in nbrs.items():
+                for edge in edge_list:
+                    if getattr(edge, "status", None) in {"confirmed", "validated", "candidate_validated"}:
+                        e_key = _relationship_key(
+                            edge.left_schema,
+                            edge.left_table,
+                            edge.left_column,
+                            edge.right_schema,
+                            edge.right_table,
+                            edge.right_column,
+                        )
+                        e_rev = (
+                            edge.right_schema,
+                            edge.right_table,
+                            edge.right_column,
+                            edge.left_schema,
+                            edge.left_table,
+                            edge.left_column,
+                        )
+                        allowed.add(e_key)
+                        allowed.add(e_rev)
 
     for relationship in relationships:
         if relationship.status not in {"confirmed", "validated", "candidate_validated"}:

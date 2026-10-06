@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from app.database.schema import DatabaseSchema, TableInfo, parse_column_reference
-from app.database.table_selector import select_tables
+from app.database.table_selector import select_tables, tokenize
 from app.database.relationship_service import RelationshipDiscoveryService
 from app.query.schema import (
     QueryPlan,
@@ -86,18 +86,38 @@ class QuestionAnalyzer:
         ">": "greater_than",
         "greater_than": "greater_than",
         "greater than": "greater_than",
+        "more_than": "greater_than",
+        "more than": "greater_than",
+        "over": "greater_than",
+        "above": "greater_than",
+        "gt": "greater_than",
 
         ">=": "greater_than_or_equal",
         "greater_than_or_equal": "greater_than_or_equal",
         "greater than or equal": "greater_than_or_equal",
+        "greater than or equal to": "greater_than_or_equal",
+        "at_least": "greater_than_or_equal",
+        "at least": "greater_than_or_equal",
+        "no less than": "greater_than_or_equal",
+        "gte": "greater_than_or_equal",
 
         "<": "less_than",
         "less_than": "less_than",
         "less than": "less_than",
+        "fewer_than": "less_than",
+        "fewer than": "less_than",
+        "under": "less_than",
+        "below": "less_than",
+        "lt": "less_than",
 
         "<=": "less_than_or_equal",
         "less_than_or_equal": "less_than_or_equal",
         "less than or equal": "less_than_or_equal",
+        "less than or equal to": "less_than_or_equal",
+        "at_most": "less_than_or_equal",
+        "at most": "less_than_or_equal",
+        "no more than": "less_than_or_equal",
+        "lte": "less_than_or_equal",
 
         "contains": "contains",
         "contain": "contains",
@@ -156,6 +176,7 @@ class QuestionAnalyzer:
         question: str,
         semantic_schema: Any,
         conversation_context: dict[str, Any] | None = None,
+        relationship_service: Any | None = None,
     ) -> QueryPlan:
 
         question = (question or "").strip()
@@ -217,6 +238,7 @@ class QuestionAnalyzer:
         relationship_context = self._get_relationship_context(
             selected_tables=selected_tables,
             database_schema=semantic_schema,
+            relationship_service=relationship_service,
         )
 
         system_prompt = self._build_system_prompt()
@@ -246,6 +268,7 @@ class QuestionAnalyzer:
             question=question,
             semantic_schema=semantic_schema,
             conversation_context=conversation_context,
+            relationship_service=relationship_service,
         )
 
         # Debug after normalization so the actual plan being
@@ -422,14 +445,30 @@ class QuestionAnalyzer:
     - left
     - right
 
-    When the question asks to identify an entity (e.g. "Which entity has the highest/lowest number of related records?") and a related entity table contains descriptive attributes (such as a name, title, description, or code) while the detail table contains the relationship or count:
-    - Include the generic JOIN between the detail table and entity table using an available relationship.
-    - Put both the identifying column and the descriptive attribute into group_by (and group_by_refs) so the entity descriptor is projected in the result.
-    - Set sort_column = "count", sort_direction = "desc" (or "asc"), and limit appropriately.
+    JOIN MINIMALITY AND QUERY GRAIN RULES:
+    1. Only include JOINs that are strictly necessary to answer the question (e.g. to reach an explicitly requested target column, filter, group_by, or distinct entity).
+    2. Do NOT add tables merely because they exist in the schema or have a valid relationship path.
+    3. Prefer the minimal path connecting only the required tables.
+    4. If the question can be fully and accurately answered using one table only, return:
+       "joins": []
+    5. For entity-level aggregation (e.g. counting registrations per resource or workspace):
+       - Group ONLY by the entity's identifying and requested descriptive columns (e.g. entity_id, entity_name).
+       - Do NOT group by columns from unrelated child activity or detail tables.
+    6. If the question requests both an entity-level aggregate count AND broad unaggregated detail records from another table (e.g. "activity details" or "activity information" alongside an aggregate count), return:
+       "intent": "unsupported",
+       "explanation": "Cannot combine entity-level aggregation with unaggregated child detail records at different grains in a single query."
 
-    If the question does not require related descriptive attributes and can be fully and accurately answered using one table only, return:
+    When the question asks to identify an entity (e.g. "Which entity has the highest/lowest number of related records?"):
+    - If the detail/record table already contains an entity identifier (such as entity_id, content_sitecore_id, etc.), DO NOT join an additional entity table unless the user explicitly requested descriptive attributes (such as "name", "title", or "description").
+    - If the user explicitly requested descriptive attributes from a related entity table (e.g. "Show the resource name...", "workspace title", etc.):
+      - Include the generic minimal JOIN between the detail table and entity table using an available relationship.
+      - Put the requested descriptive attribute into group_by (and group_by_refs).
+      - Set sort_column = "count", sort_direction = "desc" (or "asc"), and limit appropriately.
 
-    "joins": []
+    When filtering on aggregate values (HAVING clause, e.g. "more than 5 registrations", "having count > 4"):
+    - Return the aggregate filter in "having_filters" with:
+      {"column": "count", "operator": "greater_than", "value": 5}
+    - Supported operators: greater_than, greater_than_or_equal, less_than, less_than_or_equal, equals, not_equals
 
     Return this JSON structure:
 
@@ -437,6 +476,7 @@ class QuestionAnalyzer:
         "intent": "...",
         "target_columns": [],
         "filters": [],
+        "having_filters": [],
         "group_by": [],
         "group_by_granularity": null,
         "aggregation": null,
@@ -496,6 +536,7 @@ class QuestionAnalyzer:
     def _get_relationship_context(
         selected_tables: list[TableInfo],
         database_schema: DatabaseSchema,
+        relationship_service: Any | None = None,
     ) -> list[dict[str, Any]]:
         """
         Discover structural relationships between the selected tables.
@@ -515,17 +556,33 @@ class QuestionAnalyzer:
             for table in selected_tables
         ]
 
-        discovery_service = RelationshipDiscoveryService(
-            database_schema
-        )
+        if relationship_service is None:
+            discovery_service = RelationshipDiscoveryService(
+                database_schema
+            )
+        else:
+            discovery_service = relationship_service
 
         relationships = discovery_service.discover(
-            selected_table_keys
+            selected_table_keys,
+            include_bridges=True,
         )
 
         relationship_context: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str, str, str, str]] = set()
 
         for relationship in relationships:
+            rel_key = (
+                relationship.left_schema,
+                relationship.left_table,
+                relationship.left_column,
+                relationship.right_schema,
+                relationship.right_table,
+                relationship.right_column,
+            )
+            if rel_key in seen_keys:
+                continue
+            seen_keys.add(rel_key)
 
             relationship_context.append(
                 {
@@ -540,8 +597,53 @@ class QuestionAnalyzer:
                     "right_table": relationship.right_table,
                     "right_column": relationship.right_column,
                     "reason": relationship.reason,
+                    "confidence": getattr(relationship, "confidence", 1.0),
                 }
             )
+
+        # Include multi-hop path steps only if selected pair lacks a direct edge and path is viable (confidence >= 0.25)
+        for i in range(len(selected_table_keys)):
+            for j in range(i + 1, len(selected_table_keys)):
+                start = selected_table_keys[i]
+                target = selected_table_keys[j]
+                has_direct = any(
+                    ((r.left_schema, r.left_table) == start and (r.right_schema, r.right_table) == target)
+                    or ((r.left_schema, r.left_table) == target and (r.right_schema, r.right_table) == start)
+                    for r in relationships
+                    if getattr(r, "confidence", 0.0) >= 0.45
+                )
+                if not has_direct and hasattr(discovery_service, "find_best_path"):
+                    best_path = discovery_service.find_best_path(
+                        start=start,
+                        target=target,
+                        intermediate_hints=set(selected_table_keys),
+                    )
+                    if best_path and best_path.steps and best_path.confidence >= 0.25:
+                        for step in best_path.steps:
+                            s_key = (
+                                step.left_schema,
+                                step.left_table,
+                                step.left_column,
+                                step.right_schema,
+                                step.right_table,
+                                step.right_column,
+                            )
+                            if s_key not in seen_keys:
+                                seen_keys.add(s_key)
+                                relationship_context.append(
+                                    {
+                                        "relationship_type": step.relationship_type,
+                                        "status": "validated",
+                                        "left_schema": step.left_schema,
+                                        "left_table": step.left_table,
+                                        "left_column": step.left_column,
+                                        "right_schema": step.right_schema,
+                                        "right_table": step.right_table,
+                                        "right_column": step.right_column,
+                                        "reason": f"Validated path step between {start[1]} and {target[1]}",
+                                        "confidence": step.confidence,
+                                    }
+                                )
 
         return relationship_context
 
@@ -903,6 +1005,7 @@ class QuestionAnalyzer:
         question: str,
         semantic_schema: Any,
         conversation_context: dict[str, Any] | None = None,
+        relationship_service: Any | None = None,
     ) -> QueryPlan:
 
         question_lower = question.casefold()
@@ -1332,6 +1435,7 @@ class QuestionAnalyzer:
 
             if (
                 asks_for_single_winner
+                and not plan.having_filters
                 and plan.limit is None
                 and not cls._asks_for_multiple_values(
                     question_lower
@@ -1369,6 +1473,7 @@ class QuestionAnalyzer:
 
             if (
                 asks_for_single_winner
+                and not plan.having_filters
                 and plan.limit is None
                 and not cls._asks_for_multiple_values(
                     question_lower
@@ -1419,6 +1524,8 @@ class QuestionAnalyzer:
             if (
                 plan.aggregation is not None
                 and asks_for_single_winner
+                and plan.limit is None
+                and not plan.having_filters
                 and not cls._asks_for_multiple_values(
                     question_lower
                 )
@@ -1560,12 +1667,56 @@ class QuestionAnalyzer:
             "min",
             "max",
             "median",
+            "aggregation_value",
         }
 
         normalized_filters = []
-        normalized_having_filters = list(
-            getattr(plan, "having_filters", [])
-        )
+        normalized_having_filters = []
+
+        # 1. Normalize existing having_filters on the plan
+        raw_having_filters = list(getattr(plan, "having_filters", []) or [])
+        for item in raw_having_filters:
+            if isinstance(item, dict):
+                col = item.get("column") or item.get("aggregation") or plan.aggregation or "count"
+                op = item.get("operator") or item.get("op") or item.get("operation")
+                val = item.get("value")
+                if val is None and "values" in item:
+                    val = item.get("values")
+            else:
+                col = getattr(item, "column", None) or plan.aggregation or "count"
+                op = getattr(item, "operator", None)
+                val = getattr(item, "value", None)
+
+            if op is not None:
+                op = cls._normalize_operator(op)
+            if op not in cls.VALID_OPERATORS:
+                continue
+
+            col_str = str(col or "").strip().casefold()
+            if col_str not in aggregate_filter_columns:
+                if plan.aggregation and col_str == plan.aggregation:
+                    col_str = plan.aggregation
+                elif plan.aggregation:
+                    col_str = plan.aggregation
+                else:
+                    col_str = "count"
+
+            if val is not None:
+                try:
+                    if isinstance(val, str) and val.strip().isdigit():
+                        val = int(val.strip())
+                    elif isinstance(val, str):
+                        val = float(val.strip())
+                except (ValueError, TypeError):
+                    pass
+
+            normalized_having_filters.append(
+                QueryFilter(
+                    column=col_str,
+                    operator=op,
+                    value=val,
+                )
+            )
 
         for item in plan.filters:
             # Convert year operators into canonical date range filters
@@ -1643,15 +1794,32 @@ class QuestionAnalyzer:
                 getattr(item, "aggregation", "") or ""
             ).strip().casefold()
 
-            if column_name in aggregate_filter_columns:
-                normalized_having_filters.append(item)
+            filter_val = item.value
+            if filter_val is not None:
+                try:
+                    if isinstance(filter_val, str) and filter_val.strip().isdigit():
+                        filter_val = int(filter_val.strip())
+                    elif isinstance(filter_val, str):
+                        filter_val = float(filter_val.strip())
+                except (ValueError, TypeError):
+                    pass
+
+            if column_name in aggregate_filter_columns or (plan.aggregation and column_name == plan.aggregation):
+                target_col = column_name if column_name in aggregate_filter_columns else (plan.aggregation or "count")
+                normalized_having_filters.append(
+                    QueryFilter(
+                        column=target_col,
+                        operator=item.operator,
+                        value=filter_val,
+                    )
+                )
 
             elif aggregate_name in aggregate_filter_columns:
                 normalized_having_filters.append(
                     QueryFilter(
                         column=aggregate_name,
                         operator=item.operator,
-                        value=item.value,
+                        value=filter_val,
                     )
                 )
 
@@ -1664,8 +1832,46 @@ class QuestionAnalyzer:
                 ):
                     normalized_filters.append(item)
 
+        # 3. Fallback: question pattern detection when having_filters is still empty
+        if not normalized_having_filters and (plan.group_by or plan.aggregation or frequency_request):
+            detected_having = cls._detect_having_filter_from_question(
+                question_lower=question_lower,
+                aggregation=plan.aggregation or "count",
+                existing_filters=normalized_filters,
+            )
+            if detected_having:
+                normalized_having_filters.extend(detected_having)
+
+        # 4. Fallback: Inherit having_filters from prior query if this is a follow-up
+        if not normalized_having_filters and (plan.input_result_reference or recent_ref) and recent_entry:
+            if cls._is_explicit_result_reference(question_lower) or plan.input_result_reference:
+                recent_plan_obj = recent_entry.get("plan") or (recent_entry.get("query_context") or {}).get("plan")
+                if recent_plan_obj:
+                    prior_having = cls._extract_plan_field(recent_plan_obj, "having_filters") or []
+                    if prior_having and (plan.aggregation or frequency_request or plan.group_by):
+                        for h in prior_having:
+                            h_col = h.get("column") if isinstance(h, dict) else getattr(h, "column", None)
+                            h_op = h.get("operator") if isinstance(h, dict) else getattr(h, "operator", None)
+                            h_val = h.get("value") if isinstance(h, dict) else getattr(h, "value", None)
+                            if h_op:
+                                h_op = cls._normalize_operator(h_op)
+                            if h_col and h_op and h_val is not None:
+                                normalized_having_filters.append(
+                                    QueryFilter(
+                                        column=str(h_col),
+                                        operator=h_op,
+                                        value=h_val,
+                                    )
+                                )
+
         plan.filters = normalized_filters
         plan.having_filters = normalized_having_filters
+
+        if plan.having_filters:
+            if plan.intent != "derived_aggregation":
+                plan.intent = "aggregation"
+            if not plan.aggregation:
+                plan.aggregation = "count"
 
         # ------------------------------------------------------
         # 12.5. Repair lookup/filter plans with missing target columns
@@ -1927,6 +2133,7 @@ class QuestionAnalyzer:
                 )
                 and plan.limit is None
                 and not grouped_breakdown
+                and not plan.having_filters
             ):
                 plan.limit = 1
 
@@ -1944,7 +2151,7 @@ class QuestionAnalyzer:
             ):
                 plan.limit = None
 
-            # If the request is clearly a grouped breakdown,
+            # If the request is clearly a grouped breakdown or has a HAVING condition,
             # remove an accidental single-group limit introduced
             # earlier by generic "which/what/who" or ranking
             # detection.
@@ -1952,12 +2159,381 @@ class QuestionAnalyzer:
             # Explicit numeric limits such as "top 5" must always
             # be preserved.
             if (
-                grouped_breakdown
+                (grouped_breakdown or plan.having_filters)
                 and not cls._has_explicit_limit_request(
                     question_lower
                 )
             ):
                 plan.limit = None
+
+        # ------------------------------------------------------
+        # 12.8. Follow-up joins inheritance
+        # ------------------------------------------------------
+        if (
+            not plan.joins
+            and recent_entry
+            and (plan.input_result_reference or cls._is_explicit_result_reference(question_lower))
+        ):
+            recent_plan_obj = recent_entry.get("plan") or (recent_entry.get("query_context") or {}).get("plan")
+            if recent_plan_obj:
+                prior_joins_raw = cls._extract_plan_field(recent_plan_obj, "joins") or []
+                if prior_joins_raw:
+                    for j in prior_joins_raw:
+                        l_s = j.get("left_schema") if isinstance(j, dict) else getattr(j, "left_schema", None)
+                        l_t = j.get("left_table") if isinstance(j, dict) else getattr(j, "left_table", None)
+                        l_c = j.get("left_column") if isinstance(j, dict) else getattr(j, "left_column", None)
+                        r_s = j.get("right_schema") if isinstance(j, dict) else getattr(j, "right_schema", None)
+                        r_t = j.get("right_table") if isinstance(j, dict) else getattr(j, "right_table", None)
+                        r_c = j.get("right_column") if isinstance(j, dict) else getattr(j, "right_column", None)
+                        j_t = j.get("join_type") if isinstance(j, dict) else getattr(j, "join_type", "inner")
+                        if l_t and r_t and l_c and r_c:
+                            plan.joins.append(
+                                QueryJoin(
+                                    left_schema=l_s,
+                                    left_table=l_t,
+                                    left_column=l_c,
+                                    right_schema=r_s,
+                                    right_table=r_t,
+                                    right_column=r_c,
+                                    join_type=j_t,
+                                )
+                            )
+
+        # ------------------------------------------------------
+        # 12.9. Detect Incompatible Mixed Grain (Entity Aggregation vs Child Details)
+        # ------------------------------------------------------
+        # If the question asks for an aggregate measure of an entity (e.g. count)
+        # AND simultaneously requests broad unaggregated detail attributes from a separate related table
+        # (e.g. "account activity information" alongside "registration count"),
+        # grouping by detail attributes alters the aggregation grain.
+        # Fail closed with intent="unsupported" and a clear explanation.
+        has_agg = bool(plan.aggregation or plan.intent in ("aggregation", "count", "row_count"))
+        if has_agg and plan.group_by:
+            has_activity_detail_request = any(
+                phrase in question_lower
+                for phrase in (
+                    "activity information",
+                    "activity details",
+                    "account activity information",
+                    "event details",
+                    "attendee details",
+                    "transaction details",
+                    "order details",
+                )
+            )
+            gb_tables = set()
+            for r in (getattr(plan, "group_by_refs", []) or []):
+                if r and getattr(r, "table", None):
+                    gb_tables.add(str(r.table).lower())
+
+            if (has_activity_detail_request and semantic_schema and len(semantic_schema.tables) >= 2) or (len(gb_tables) >= 2 and len(plan.group_by) > 4):
+                plan.intent = "unsupported"
+                plan.explanation = (
+                    "The question requests both aggregated metrics (such as counts) and "
+                    "unaggregated detail attributes across multiple related entities at incompatible "
+                    "aggregation grains. Grouping by child detail attributes would alter the entity aggregation grain. "
+                    "Please query the aggregated metrics by entity, or view the detail records separately."
+                )
+                plan.joins = []
+                return plan
+
+        # ------------------------------------------------------
+        # 13. Relationship & Multi-Hop Path Resolution with Join Minimality
+        # ------------------------------------------------------
+        if relationship_service is None and semantic_schema is not None and hasattr(semantic_schema, "tables"):
+            relationship_service = RelationshipDiscoveryService(semantic_schema)
+
+        if relationship_service is not None and semantic_schema and hasattr(semantic_schema, "tables") and plan.intent != "unsupported":
+            is_anti_or_left = bool(
+                re.search(r"\b(?:no|zero|without|never|none|0)\s+\w+", question_lower)
+                or re.search(r"\bhave\s+(?:no|zero|0)\b", question_lower)
+                or re.search(r"\bwith\s+no\b", question_lower)
+                or re.search(r"\bwithout\s+any\b", question_lower)
+            )
+
+            # 1. Identify tables strictly required by the query plan
+            required_tables: set[tuple[str, str]] = set()
+
+            # Tables hosting target_column_refs and group_by_refs
+            for ref in (getattr(plan, "target_column_refs", []) or []) + (getattr(plan, "group_by_refs", []) or []):
+                if ref and getattr(ref, "table", None):
+                    ref_tbl = str(ref.table).lower()
+                    ref_sch = str(ref.schema).lower() if getattr(ref, "schema", None) else None
+                    for t in semantic_schema.tables:
+                        if t.table_name.lower() == ref_tbl:
+                            if ref_sch is None or t.schema_name.lower() == ref_sch:
+                                required_tables.add((t.schema_name, t.table_name))
+
+            # Tables hosting target_columns, group_by, filters, sort_column
+            all_cols = list(plan.target_columns or []) + list(plan.group_by or [])
+            for f in (plan.filters or []):
+                if f and getattr(f, "column", None):
+                    all_cols.append(f.column)
+            if getattr(plan, "sort_column", None) and plan.sort_column not in aggregate_filter_columns:
+                all_cols.append(plan.sort_column)
+
+            for col_name in all_cols:
+                sch_p, tbl_p, base_c = parse_column_reference(str(col_name))
+                if tbl_p:
+                    for t in semantic_schema.tables:
+                        if t.table_name.lower() == tbl_p.lower():
+                            if not sch_p or t.schema_name.lower() == sch_p.lower():
+                                required_tables.add((t.schema_name, t.table_name))
+                else:
+                    matching_tables = [
+                        (t.schema_name, t.table_name)
+                        for t in semantic_schema.tables
+                        if any(c.name.lower() == base_c.lower() for c in t.columns)
+                    ]
+                    if len(matching_tables) == 1:
+                        required_tables.add(matching_tables[0])
+                    elif len(matching_tables) > 1 and semantic_schema.tables:
+                        primary_key = (semantic_schema.tables[0].schema_name, semantic_schema.tables[0].table_name)
+                        if primary_key in matching_tables:
+                            required_tables.add(primary_key)
+                        else:
+                            required_tables.add(matching_tables[0])
+
+            # Detect tables and entities mentioned in the question
+            q_tokens = set(re.findall(r"\b[a-zA-Z_]+\b", question_lower))
+            q_stems = {tok.rstrip("s") for tok in q_tokens}
+            required_intermediates: set[tuple[str, str]] = set()
+            for t in semantic_schema.tables:
+                t_lower = t.table_name.lower()
+                t_stem = t_lower.rstrip("s")
+                t_parts = [p for p in t_lower.split("_") if len(p) > 3]
+                if t_lower in q_tokens or t_stem in q_stems or any(p in q_tokens or p.rstrip("s") in q_stems for p in t_parts):
+                    # Table is mentioned in question
+                    if (t.schema_name, t.table_name) not in required_tables:
+                        # If required_tables is already non-empty and this is a secondary mentioned entity
+                        if required_tables:
+                            required_tables.add((t.schema_name, t.table_name))
+                        else:
+                            required_intermediates.add((t.schema_name, t.table_name))
+
+            # Follow-up queries referencing prior conversation context preserve prior joins
+            if getattr(plan, "input_result_reference", None) is not None and plan.joins:
+                for j in plan.joins:
+                    required_tables.add((j.left_schema, j.left_table))
+                    required_tables.add((j.right_schema, j.right_table))
+
+            new_joins: list[QueryJoin] = []
+            seen_join_pairs: set[tuple[str, str, str, str, str, str]] = set()
+            joined_tables: set[tuple[str, str]] = set()
+
+            def _can_add_join(l_s: str, l_t: str, r_s: str, r_t: str) -> bool:
+                l_k = (l_s, l_t)
+                r_k = (r_s, r_t)
+                if not joined_tables:
+                    return True
+                if l_k in joined_tables and r_k in joined_tables:
+                    return False
+                return True
+
+            def _record_join(l_s: str, l_t: str, r_s: str, r_t: str) -> None:
+                joined_tables.add((l_s, l_t))
+                joined_tables.add((r_s, r_t))
+
+            # Single table query -> NO JOINS
+            if len(required_tables) <= 1:
+                plan.joins = []
+
+            # Multi-table query with joins supplied
+            elif plan.joins:
+                for join in plan.joins:
+                    j_type = "left" if is_anti_or_left else getattr(join, "join_type", "inner")
+                    left_key = (join.left_schema, join.left_table)
+                    right_key = (join.right_schema, join.right_table)
+
+                    # Check direct edge validity
+                    direct_edges = []
+                    if hasattr(relationship_service, "get_edges"):
+                        direct_edges = relationship_service.get_edges(left_key, right_key, accepted_only=True)
+                    elif hasattr(relationship_service, "get_graph"):
+                        direct_edges = relationship_service.get_graph().get_edges(left_key, right_key, accepted_only=True)
+                    has_valid_direct = any(getattr(e, "confidence", 0.0) >= 0.45 for e in direct_edges)
+
+                    best_path = None
+                    if not has_valid_direct and hasattr(relationship_service, "find_best_path"):
+                        best_path = relationship_service.find_best_path(
+                            start=left_key,
+                            target=right_key,
+                            required_intermediates=required_intermediates,
+                        )
+
+                    if best_path and best_path.steps and best_path.confidence >= 0.25:
+                        for step in best_path.steps:
+                            step_key = (
+                                step.left_schema, step.left_table, step.left_column,
+                                step.right_schema, step.right_table, step.right_column,
+                            )
+                            rev_key = (
+                                step.right_schema, step.right_table, step.right_column,
+                                step.left_schema, step.left_table, step.left_column,
+                            )
+                            if (
+                                step_key not in seen_join_pairs
+                                and rev_key not in seen_join_pairs
+                                and _can_add_join(step.left_schema, step.left_table, step.right_schema, step.right_table)
+                            ):
+                                seen_join_pairs.add(step_key)
+                                _record_join(step.left_schema, step.left_table, step.right_schema, step.right_table)
+                                new_joins.append(
+                                    QueryJoin(
+                                        left_schema=step.left_schema,
+                                        left_table=step.left_table,
+                                        left_column=step.left_column,
+                                        right_schema=step.right_schema,
+                                        right_table=step.right_table,
+                                        right_column=step.right_column,
+                                        join_type=j_type,
+                                    )
+                                )
+                    elif has_valid_direct:
+                        j_key = (
+                            join.left_schema, join.left_table, join.left_column,
+                            join.right_schema, join.right_table, join.right_column,
+                        )
+                        rev_key = (
+                            join.right_schema, join.right_table, join.right_column,
+                            join.left_schema, join.left_table, join.left_column,
+                        )
+                        if (
+                            j_key not in seen_join_pairs
+                            and rev_key not in seen_join_pairs
+                            and _can_add_join(join.left_schema, join.left_table, join.right_schema, join.right_table)
+                        ):
+                            seen_join_pairs.add(j_key)
+                            _record_join(join.left_schema, join.left_table, join.right_schema, join.right_table)
+                            new_joins.append(
+                                QueryJoin(
+                                    left_schema=join.left_schema,
+                                    left_table=join.left_table,
+                                    left_column=join.left_column,
+                                    right_schema=join.right_schema,
+                                    right_table=join.right_table,
+                                    right_column=join.right_column,
+                                    join_type=j_type,
+                                )
+                            )
+                plan.joins = new_joins
+
+            # Multi-table query with empty initial joins
+            elif len(required_tables) >= 2 and hasattr(relationship_service, "find_connecting_path"):
+                connecting_steps = relationship_service.find_connecting_path(
+                    tables=list(required_tables),
+                    required_intermediates=required_intermediates,
+                )
+                if connecting_steps:
+                    j_type = "left" if is_anti_or_left else "inner"
+                    for step in connecting_steps:
+                        step_key = (
+                            step.left_schema, step.left_table, step.left_column,
+                            step.right_schema, step.right_table, step.right_column,
+                        )
+                        if (
+                            step_key not in seen_join_pairs
+                            and _can_add_join(step.left_schema, step.left_table, step.right_schema, step.right_table)
+                        ):
+                            seen_join_pairs.add(step_key)
+                            _record_join(step.left_schema, step.left_table, step.right_schema, step.right_table)
+                            new_joins.append(
+                                QueryJoin(
+                                    left_schema=step.left_schema,
+                                    left_table=step.left_table,
+                                    left_column=step.left_column,
+                                    right_schema=step.right_schema,
+                                    right_table=step.right_table,
+                                    right_column=step.right_column,
+                                    join_type=j_type,
+                                )
+                            )
+                    plan.joins = new_joins
+
+        # ------------------------------------------------------
+        # 14. Entity Projection Preservation
+        # ------------------------------------------------------
+        if plan.group_by and (plan.aggregation or plan.intent in ("aggregation", "ranking")) and plan.intent != "unsupported" and semantic_schema:
+            existing_gb_set = {c.lower() for c in plan.group_by}
+
+            # Identify the primary entity table whose ID is in group_by
+            primary_entity_table = None
+            for t in semantic_schema.tables:
+                t_cols = {c.name.lower(): c for c in t.columns}
+                id_cols = [c.name.lower() for c in t.columns if c.name.lower().endswith("_id") or c.name.lower() == "id"]
+                if any(gb.lower() in id_cols for gb in plan.group_by):
+                    primary_entity_table = t
+                    break
+
+            if primary_entity_table is not None:
+                t = primary_entity_table
+                for col_obj in t.columns:
+                    c_name = col_obj.name.lower()
+                    if c_name not in existing_gb_set and any(term in c_name for term in ("name", "title")):
+                        if not any(term in c_name for term in ("_id", "count", "sum", "avg", "type", "date", "status", "number")):
+                            requested = (
+                                any(c_name == tc.lower() for tc in (plan.target_columns or []))
+                                or any(term in question_lower for term in ("name", "title", "which", "who", "show"))
+                            )
+                            if requested:
+                                plan.group_by.append(col_obj.name)
+                                existing_gb_set.add(c_name)
+                                if plan.group_by_refs is not None:
+                                    plan.group_by_refs.append(
+                                        QueryColumn(
+                                            schema=t.schema_name,
+                                            table=t.table_name,
+                                            column=col_obj.name,
+                                        )
+                                    )
+                                break
+
+        # ------------------------------------------------------
+        # 15. Filter & Target Column Qualification across Joined Tables
+        # ------------------------------------------------------
+        if plan.joins and semantic_schema:
+            joined_table_objs = []
+            joined_table_names = set()
+            for j in plan.joins:
+                joined_table_names.add((j.left_schema.lower(), j.left_table.lower()))
+                joined_table_names.add((j.right_schema.lower(), j.right_table.lower()))
+            for t in semantic_schema.tables:
+                if (t.schema_name.lower(), t.table_name.lower()) in joined_table_names:
+                    joined_table_objs.append(t)
+
+            first_j = plan.joins[0]
+            primary = next(
+                (t for t in joined_table_objs if t.table_name.lower() == first_j.left_table.lower()),
+                joined_table_objs[0] if joined_table_objs else None
+            )
+
+            if plan.filters:
+                for f in plan.filters:
+                    if f and getattr(f, "column", None) and "." not in f.column:
+                        f_col_lower = f.column.lower()
+                        matching_tbls = [
+                            t for t in joined_table_objs
+                            if any(c.name.lower() == f_col_lower for c in t.columns)
+                        ]
+                        if len(matching_tbls) > 1 and primary:
+                            f.column = f"{primary.schema_name}.{primary.table_name}.{f.column}"
+
+            if plan.target_columns and primary and getattr(plan, "aggregation", None):
+                new_targets = []
+                for tc in plan.target_columns:
+                    if tc and "." not in tc:
+                        tc_lower = tc.lower()
+                        matching_tbls = [
+                            t for t in joined_table_objs
+                            if any(c.name.lower() == tc_lower for c in t.columns)
+                        ]
+                        if len(matching_tbls) > 1:
+                            new_targets.append(f"{primary.schema_name}.{primary.table_name}.{tc}")
+                        else:
+                            new_targets.append(tc)
+                    else:
+                        new_targets.append(tc)
+                plan.target_columns = new_targets
 
         return plan
 
@@ -2438,6 +3014,71 @@ class QuestionAnalyzer:
             or comparison_structure
         )
 
+    @classmethod
+    def _detect_having_filter_from_question(
+        cls,
+        question_lower: str,
+        aggregation: str | None = None,
+        existing_filters: list[QueryFilter] | None = None,
+    ) -> list[QueryFilter]:
+        """
+        Detect generic aggregate HAVING conditions from user question text
+        when LLM omitted having_filters.
+
+        Handles:
+          - greater_than: "more than 5", "greater than 4", "over 5", "above 5", "> 5"
+          - greater_than_or_equal: "at least 5", "no less than 5", ">= 5", "5 or more"
+          - less_than: "less than 5", "fewer than 5", "under 5", "below 5", "< 5"
+          - less_than_or_equal: "at most 5", "no more than 5", "<= 5", "5 or less", "5 or fewer"
+          - equals: "exactly 5", "equal to 5", "== 5"
+          - not_equals: "not equal to 5", "different from 5", "!= 5"
+        """
+        existing_ops_vals = set()
+        if existing_filters:
+            for f in existing_filters:
+                existing_ops_vals.add((f.operator, f.value))
+
+        patterns = [
+            # >=
+            (r"\b(?:at\s+least|no\s+less\s+than|greater\s+than\s+or\s+equal\s+to|\>\=)\s+(\d+(?:\.\d+)?)\b", "greater_than_or_equal"),
+            (r"\b(\d+(?:\.\d+)?)\s+or\s+more\b", "greater_than_or_equal"),
+            # <=
+            (r"\b(?:at\s+most|no\s+more\s+than|less\s+than\s+or\s+equal\s+to|\<\=)\s+(\d+(?:\.\d+)?)\b", "less_than_or_equal"),
+            (r"\b(\d+(?:\.\d+)?)\s+or\s+(?:less|fewer)\b", "less_than_or_equal"),
+            # >
+            (r"\b(?:more\s+than|greater\s+than|over|above|\>)\s+(\d+(?:\.\d+)?)\b", "greater_than"),
+            # <
+            (r"\b(?:fewer\s+than|less\s+than|under|below|\<)\s+(\d+(?:\.\d+)?)\b", "less_than"),
+            # ==
+            (r"\b(?:exactly|equal\s+to|\=\=)\s+(\d+(?:\.\d+)?)\b", "equals"),
+            # !=
+            (r"\b(?:not\s+equal\s+to|different\s+from|do\s+not\s+have|does\s+not\s+have|\!\=|\<\>)\s+(\d+(?:\.\d+)?)\b", "not_equals"),
+        ]
+
+        target_col = aggregation or "count"
+
+        for pattern, op in patterns:
+            match = re.search(pattern, question_lower)
+            if match:
+                raw_val = match.group(1)
+                try:
+                    num_val = int(raw_val) if raw_val.isdigit() else float(raw_val)
+                except ValueError:
+                    continue
+
+                if (op, num_val) in existing_ops_vals:
+                    continue
+
+                return [
+                    QueryFilter(
+                        column=target_col,
+                        operator=op,
+                        value=num_val,
+                    )
+                ]
+
+        return []
+
     @staticmethod
     def _is_grouped_breakdown_request(
         question: str,
@@ -2480,6 +3121,7 @@ class QuestionAnalyzer:
             r"\blast\s+\d+\b",
             r"\b(?:show|give|list|return|find|display)\s+(?:me\s+)?\d+\b",
             r"\b\d+\s+(?:groups?|categories?|items?|records?|results?|entries?)\b",
+            r"\b(?:for\s+the\s+|the\s+)?\d+\s+[a-z_]+\b",
         ]
 
         return any(
@@ -3018,6 +3660,60 @@ class QuestionAnalyzer:
             )
 
         # --------------------------------------------------
+        # Having filters
+        # --------------------------------------------------
+
+        having_filters = []
+
+        raw_having_filters = data.get(
+            "having_filters",
+            [],
+        )
+
+        if isinstance(raw_having_filters, list):
+            for filter_data in raw_having_filters:
+                if not isinstance(filter_data, dict):
+                    continue
+
+                column = filter_data.get("column")
+                if not column:
+                    column = filter_data.get("aggregation") or "count"
+
+                operator = filter_data.get("operator")
+                if operator is None:
+                    operator = filter_data.get("op")
+                if operator is None:
+                    operator = filter_data.get("operation")
+
+                if not column or operator is None:
+                    continue
+
+                operator = QuestionAnalyzer._normalize_operator(operator)
+                if operator not in QuestionAnalyzer.VALID_OPERATORS:
+                    continue
+
+                filter_value = filter_data.get("value")
+                if filter_value is None and "values" in filter_data:
+                    filter_value = filter_data.get("values")
+
+                if filter_value is not None:
+                    try:
+                        if isinstance(filter_value, str) and filter_value.strip().isdigit():
+                            filter_value = int(filter_value.strip())
+                        elif isinstance(filter_value, str):
+                            filter_value = float(filter_value.strip())
+                    except (ValueError, TypeError):
+                        pass
+
+                having_filters.append(
+                    QueryFilter(
+                        column=str(column),
+                        operator=operator,
+                        value=filter_value,
+                    )
+                )
+
+        # --------------------------------------------------
         # Input result reference
         # --------------------------------------------------
 
@@ -3392,6 +4088,8 @@ class QuestionAnalyzer:
             ),
 
             joins=joins,
+
+            having_filters=having_filters,
 
             target_column_refs=target_column_refs,
 

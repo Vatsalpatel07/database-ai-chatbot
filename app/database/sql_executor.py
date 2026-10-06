@@ -557,10 +557,13 @@ class SQLQueryExecutor:
             ]
 
             if len(matching_tables) > 1:
-                raise SQLQueryExecutionError(
-                    "JOIN query cannot unambiguously resolve column: "
-                    f"{column_name}"
-                )
+                if first_left_key in matching_tables:
+                    key = first_left_key
+                else:
+                    raise SQLQueryExecutionError(
+                        "JOIN query cannot unambiguously resolve column: "
+                        f"{column_name}"
+                    )
 
             if not matching_tables:
                 raise SQLQueryExecutionError(
@@ -799,13 +802,55 @@ class SQLQueryExecutor:
             target_table = table_lookup[target_table_key]
             target_alias = aliases[target_table_key]
             identifying_columns = self._get_entity_identifying_columns(target_table)
+            has_left_join = any(getattr(j, "join_type", "inner") == "left" for j in plan.joins)
+            left_join_targets = [
+                (j.right_schema, j.right_table)
+                for j in plan.joins
+                if getattr(j, "join_type", "inner") == "left"
+            ]
 
-            # Subquery projection deduplicating at the target entity grain
+            # Subquery projection deduplicating at the appropriate grain
             subquery_parts: list[str] = []
-            for idx, col in enumerate(identifying_columns):
-                subquery_parts.append(
-                    f"{target_alias}.{self._quote_identifier(col)} AS {self._quote_identifier(f'__sub_id_{idx}')}"
-                )
+            if aggregation == "count" and not (plan.target_columns and plan.target_columns[0] != "*"):
+                if plan.group_by:
+                    # When grouped, project identifying columns across all joined tables
+                    # so child/detail rows are not collapsed to 1 row per group.
+                    id_idx = 0
+                    for k in joined_keys:
+                        tbl = table_lookup[k]
+                        tbl_alias = aliases[k]
+                        for col in self._get_entity_identifying_columns(tbl):
+                            subquery_parts.append(
+                                f"{tbl_alias}.{self._quote_identifier(col)} AS {self._quote_identifier(f'__sub_id_{id_idx}')}"
+                            )
+                            id_idx += 1
+                else:
+                    # Scalar count: deduplicate at target entity grain (e.g. count customers with orders)
+                    for idx, col in enumerate(identifying_columns):
+                        subquery_parts.append(
+                            f"{target_alias}.{self._quote_identifier(col)} AS {self._quote_identifier(f'__sub_id_{idx}')}"
+                        )
+
+                if left_join_targets:
+                    last_right_key = None
+                    for k in joined_keys:
+                        if k[1].lower() == left_join_targets[-1][1].lower():
+                            if not left_join_targets[-1][0] or k[0].lower() == left_join_targets[-1][0].lower():
+                                last_right_key = k
+                                break
+                    if last_right_key:
+                        last_tbl = table_lookup[last_right_key]
+                        last_alias = aliases[last_right_key]
+                        last_id_cols = self._get_entity_identifying_columns(last_tbl)
+                        right_check_col = last_id_cols[0] if last_id_cols else last_tbl.columns[0].name
+                        subquery_parts.append(
+                            f"{last_alias}.{self._quote_identifier(right_check_col)} AS {self._quote_identifier('__sub_right_id')}"
+                        )
+            else:
+                for idx, col in enumerate(identifying_columns):
+                    subquery_parts.append(
+                        f"{target_alias}.{self._quote_identifier(col)} AS {self._quote_identifier(f'__sub_id_{idx}')}"
+                    )
 
             if plan.group_by:
                 for idx, column_name in enumerate(plan.group_by):
@@ -863,9 +908,18 @@ class SQLQueryExecutor:
                     )
 
             sub_target_expr = f"sub.{self._quote_identifier('__sub_target')}"
+            is_distinct = bool(getattr(plan, "distinct", False))
             if aggregation == "count":
                 if has_target_measure:
-                    outer_agg_expr = f"COUNT({sub_target_expr})"
+                    if is_distinct:
+                        outer_agg_expr = f"COUNT(DISTINCT {sub_target_expr})"
+                    else:
+                        outer_agg_expr = f"COUNT({sub_target_expr})"
+                elif left_join_targets:
+                    if is_distinct:
+                        outer_agg_expr = f"COUNT(DISTINCT sub.{self._quote_identifier('__sub_right_id')})"
+                    else:
+                        outer_agg_expr = f"COUNT(sub.{self._quote_identifier('__sub_right_id')})"
                 else:
                     outer_agg_expr = "COUNT(*)"
             elif aggregation == "sum":

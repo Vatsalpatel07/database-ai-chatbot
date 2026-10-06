@@ -272,14 +272,25 @@ def expand_selected_tables_by_relationships(
 
     for index, start in enumerate(selected_keys):
         for target in selected_keys[index + 1:]:
-            if is_graph_object:
-                path = relationships.find_shortest_path(start, target)
-            else:
-                path = find_shortest_table_path(
-                    start,
-                    target,
-                    graph,
+            path = None
+            if is_graph_object and hasattr(relationships, "find_best_path"):
+                best_path_res = relationships.find_best_path(
+                    start=start,
+                    target=target,
+                    intermediate_hints=set(selected_keys),
                 )
+                if best_path_res is not None and best_path_res.steps:
+                    path = [start] + [(s.right_schema, s.right_table) for s in best_path_res.steps]
+
+            if path is None:
+                if is_graph_object:
+                    path = relationships.find_shortest_path(start, target)
+                else:
+                    path = find_shortest_table_path(
+                        start,
+                        target,
+                        graph,
+                    )
 
             if path is None:
                 continue
